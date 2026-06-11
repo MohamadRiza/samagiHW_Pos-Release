@@ -29,6 +29,7 @@ function writeLog(message) {
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
     app.quit();
+    process.exit(0);
 }
 
 app.on('second-instance', () => {
@@ -103,39 +104,133 @@ function setupEnvironment() {
         }
     }
 
-    // Migration logic: check if there's an old database in AppData
+    // Helper to copy folder recursively
+    const copyFolderRecursive = (src, dest) => {
+        if (!fs.existsSync(dest)) {
+            fs.mkdirSync(dest, { recursive: true });
+        }
+        const entries = fs.readdirSync(src, { withFileTypes: true });
+        for (const entry of entries) {
+            const srcPath = path.join(src, entry.name);
+            const destPath = path.join(dest, entry.name);
+            if (entry.isDirectory()) {
+                copyFolderRecursive(srcPath, destPath);
+            } else {
+                fs.copyFileSync(srcPath, destPath);
+            }
+        }
+    };
+
+    // Migration logic: search AppData and candidate paths for the largest existing database
     const targetDbPath = process.env.DB_PATH;
-    const oldDbPath = path.join(userDataPath, 'pos_database.sqlite');
-    if (fs.existsSync(oldDbPath) && !fs.existsSync(targetDbPath)) {
-        try {
-            fs.copyFileSync(oldDbPath, targetDbPath);
-            writeLog(`Migrated database from AppData to: ${targetDbPath}`);
-            fs.renameSync(oldDbPath, oldDbPath + '.backup');
-        } catch (e) {
-            writeLog(`Migration error: ${e.message}`);
-        }
-    }
+    const migrationFlagPath = path.join(sharedDataDir, '.migrated');
 
-    // Migrate uploads and backups folders if they exist in AppData
-    const oldUploadsDir = path.join(userDataPath, 'uploads');
-    const targetUploadsDir = process.env.UPLOADS_PATH;
-    if (fs.existsSync(oldUploadsDir) && !fs.existsSync(targetUploadsDir)) {
-        try {
-            fs.renameSync(oldUploadsDir, targetUploadsDir);
-            writeLog(`Migrated uploads folder to: ${targetUploadsDir}`);
-        } catch (e) {
-            writeLog(`Uploads migration error: ${e.message}`);
-        }
-    }
+    if (fs.existsSync(migrationFlagPath)) {
+        writeLog('Migration flag file (.migrated) exists. Skipping database migration.');
+    } else {
+        writeLog('No migration flag file found. Running database migration scan...');
+        const oldDbCandidates = [
+            path.join(app.getPath('appData'), 'samagi-pos', 'pos_database.sqlite'),
+            path.join(app.getPath('appData'), 'samagi-pos', 'samagi-pos', 'pos_database.sqlite'),
+            path.join(app.getPath('userData'), 'pos_database.sqlite'),
+            path.join(app.getPath('appData'), 'Samagi Hardware POS', 'pos_database.sqlite'),
+            path.join(userDataPath, 'pos_database.sqlite'),
+        ];
 
-    const oldBackupsDir = path.join(userDataPath, 'backups');
-    const targetBackupsDir = process.env.BACKUPS_PATH;
-    if (fs.existsSync(oldBackupsDir) && !fs.existsSync(targetBackupsDir)) {
-        try {
-            fs.renameSync(oldBackupsDir, targetBackupsDir);
-            writeLog(`Migrated backups folder to: ${targetBackupsDir}`);
-        } catch (e) {
-            writeLog(`Backups migration error: ${e.message}`);
+        // Filter duplicates and target database path to avoid checking/logging the same file multiple times
+        const uniqueCandidates = [...new Set(oldDbCandidates.map(p => path.resolve(p)))].filter(
+            cand => cand !== path.resolve(targetDbPath)
+        );
+
+        let bestOldDbPath = null;
+        let maxBytes = 0;
+
+        for (const cand of uniqueCandidates) {
+            if (fs.existsSync(cand)) {
+                try {
+                    const stats = fs.statSync(cand);
+                    writeLog(`Found old database candidate: ${cand} (${stats.size} bytes)`);
+                    if (stats.size > maxBytes) {
+                        maxBytes = stats.size;
+                        bestOldDbPath = cand;
+                    }
+                } catch (e) {
+                    writeLog(`Error checking candidate ${cand}: ${e.message}`);
+                }
+            }
+        }
+
+        if (bestOldDbPath) {
+            try {
+                let shouldCopy = true;
+                if (fs.existsSync(targetDbPath)) {
+                    const targetStats = fs.statSync(targetDbPath);
+                    const oldStats = fs.statSync(bestOldDbPath);
+                    // If target database is already larger than or equal to the candidate, do NOT copy
+                    if (targetStats.size >= oldStats.size) {
+                        shouldCopy = false;
+                        writeLog(`Target database is already equal or larger (${targetStats.size} bytes vs old ${oldStats.size} bytes). Skipping copy.`);
+                    }
+                }
+
+                if (shouldCopy) {
+                    // Keep backup of any current database in target folder before migrating to prevent data damage/loss
+                    if (fs.existsSync(targetDbPath)) {
+                        const backupTemp = targetDbPath + '.before_migration_' + Date.now();
+                        fs.renameSync(targetDbPath, backupTemp);
+                        writeLog(`Backed up current database to: ${backupTemp}`);
+                    }
+                    
+                    fs.copyFileSync(bestOldDbPath, targetDbPath);
+                    writeLog(`✅ SUCCESS: Migrated database from ${bestOldDbPath} to ${targetDbPath}`);
+                }
+
+                // Copy uploads and backups folders if they exist in the old folder
+                const oldParentDir = path.dirname(bestOldDbPath);
+                
+                const oldUploadsDir = path.join(oldParentDir, 'uploads');
+                const targetUploadsDir = process.env.UPLOADS_PATH;
+                if (fs.existsSync(oldUploadsDir) && !fs.existsSync(targetUploadsDir)) {
+                    try {
+                        fs.renameSync(oldUploadsDir, targetUploadsDir);
+                        writeLog(`Migrated uploads folder to: ${targetUploadsDir}`);
+                    } catch (e) {
+                        try {
+                            copyFolderRecursive(oldUploadsDir, targetUploadsDir);
+                            writeLog(`Copied uploads folder to: ${targetUploadsDir}`);
+                        } catch (copyErr) {
+                            writeLog(`Uploads migration error: ${copyErr.message}`);
+                        }
+                    }
+                }
+
+                const oldBackupsDir = path.join(oldParentDir, 'backups');
+                const targetBackupsDir = process.env.BACKUPS_PATH;
+                if (fs.existsSync(oldBackupsDir) && !fs.existsSync(targetBackupsDir)) {
+                    try {
+                        fs.renameSync(oldBackupsDir, targetBackupsDir);
+                        writeLog(`Migrated backups folder to: ${targetBackupsDir}`);
+                    } catch (e) {
+                        try {
+                            copyFolderRecursive(oldBackupsDir, targetBackupsDir);
+                            writeLog(`Copied backups folder to: ${targetBackupsDir}`);
+                        } catch (copyErr) {
+                            writeLog(`Backups migration error: ${copyErr.message}`);
+                        }
+                    }
+                }
+
+                // Write flag file upon successful migration
+                fs.writeFileSync(migrationFlagPath, `migrated on ${new Date().toISOString()}`);
+                writeLog(`Created migration flag file: ${migrationFlagPath}`);
+
+            } catch (migrationErr) {
+                writeLog(`❌ Migration execution error: ${migrationErr.message}`);
+            }
+        } else {
+            // No old database found to migrate, so write flag file to skip checks on future startups
+            fs.writeFileSync(migrationFlagPath, `skipped on ${new Date().toISOString()} (no old db found)`);
+            writeLog(`No database to migrate. Created flag file: ${migrationFlagPath}`);
         }
     }
 
