@@ -437,6 +437,23 @@ ipcMain.handle('restart-backend', async () => {
 
 ipcMain.handle('create-desktop-backup', async () => {
     try {
+        // Trigger WAL checkpoint in Express backend before copying to flush active modifications
+        await new Promise((resolve) => {
+            const http = require('http');
+            const req = http.request({
+                hostname: 'localhost',
+                port: 5000,
+                path: '/api/settings/checkpoint-db-internal',
+                method: 'POST'
+            }, (res) => {
+                resolve();
+            });
+            req.on('error', () => {
+                resolve();
+            });
+            req.end();
+        });
+
         const desktopDir = app.getPath('desktop');
         const targetDir = path.join(desktopDir, 'database_posSystem');
         
