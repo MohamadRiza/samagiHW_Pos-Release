@@ -74,24 +74,26 @@ function getBackendPath() {
 // ─── Setup environment variables ───────────────────────────────────────────
 function setupEnvironment() {
     const userDataPath = app.getPath('userData');
+    const isWin = process.platform === 'win32';
+    const sharedDataDir = isWin ? 'C:\\SamagiHardwarePOS' : path.join(app.getPath('home'), 'SamagiHardwarePOS');
 
     process.env.NODE_ENV = 'production';
     process.env.PORT = '5000';
     process.env.ELECTRON_APP = 'true';
     process.env.IS_PACKAGED = String(app.isPackaged);
-    process.env.USER_DATA_PATH = userDataPath;
-    process.env.DB_PATH = path.join(userDataPath, 'pos_database.sqlite');
-    process.env.UPLOADS_PATH = path.join(userDataPath, 'uploads');
-    process.env.BACKUPS_PATH = path.join(userDataPath, 'backups');
+    process.env.USER_DATA_PATH = sharedDataDir;
+    process.env.DB_PATH = path.join(sharedDataDir, 'pos_database.sqlite');
+    process.env.UPLOADS_PATH = path.join(sharedDataDir, 'uploads');
+    process.env.BACKUPS_PATH = path.join(sharedDataDir, 'backups');
     process.env.JWT_SECRET = process.env.JWT_SECRET || 'samagi-pos-secret-key-2024-min-32-chars-long!!';
     process.env.APP_VERSION = app.getVersion();
 
     // Create required directories
     const dirs = [
-        userDataPath,
-        path.join(userDataPath, 'uploads'),
-        path.join(userDataPath, 'backups'),
-        path.join(userDataPath, 'temp'),
+        sharedDataDir,
+        path.join(sharedDataDir, 'uploads'),
+        path.join(sharedDataDir, 'backups'),
+        path.join(sharedDataDir, 'temp'),
     ];
 
     for (const dir of dirs) {
@@ -101,8 +103,43 @@ function setupEnvironment() {
         }
     }
 
-    // Copy initial database if user doesn't have one yet
+    // Migration logic: check if there's an old database in AppData
     const targetDbPath = process.env.DB_PATH;
+    const oldDbPath = path.join(userDataPath, 'pos_database.sqlite');
+    if (fs.existsSync(oldDbPath) && !fs.existsSync(targetDbPath)) {
+        try {
+            fs.copyFileSync(oldDbPath, targetDbPath);
+            writeLog(`Migrated database from AppData to: ${targetDbPath}`);
+            fs.renameSync(oldDbPath, oldDbPath + '.backup');
+        } catch (e) {
+            writeLog(`Migration error: ${e.message}`);
+        }
+    }
+
+    // Migrate uploads and backups folders if they exist in AppData
+    const oldUploadsDir = path.join(userDataPath, 'uploads');
+    const targetUploadsDir = process.env.UPLOADS_PATH;
+    if (fs.existsSync(oldUploadsDir) && !fs.existsSync(targetUploadsDir)) {
+        try {
+            fs.renameSync(oldUploadsDir, targetUploadsDir);
+            writeLog(`Migrated uploads folder to: ${targetUploadsDir}`);
+        } catch (e) {
+            writeLog(`Uploads migration error: ${e.message}`);
+        }
+    }
+
+    const oldBackupsDir = path.join(userDataPath, 'backups');
+    const targetBackupsDir = process.env.BACKUPS_PATH;
+    if (fs.existsSync(oldBackupsDir) && !fs.existsSync(targetBackupsDir)) {
+        try {
+            fs.renameSync(oldBackupsDir, targetBackupsDir);
+            writeLog(`Migrated backups folder to: ${targetBackupsDir}`);
+        } catch (e) {
+            writeLog(`Backups migration error: ${e.message}`);
+        }
+    }
+
+    // Copy initial database if user doesn't have one yet (either migrated or newly created)
     if (!fs.existsSync(targetDbPath)) {
         const sourceDbPaths = [
             path.join(process.resourcesPath, 'pos_database.sqlite'),
@@ -300,6 +337,70 @@ ipcMain.handle('restart-backend', async () => {
         return { success: started };
     } catch (error) {
         return { success: false, error: error.message };
+    }
+});
+
+ipcMain.handle('create-desktop-backup', async () => {
+    try {
+        const desktopDir = app.getPath('desktop');
+        const targetDir = path.join(desktopDir, 'database_posSystem');
+        
+        if (!fs.existsSync(targetDir)) {
+            fs.mkdirSync(targetDir, { recursive: true });
+        }
+        
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+        const backupFolder = path.join(targetDir, `Backup_${timestamp}`);
+        fs.mkdirSync(backupFolder, { recursive: true });
+        
+        const dbPath = process.env.DB_PATH || 'C:\\SamagiHardwarePOS\\pos_database.sqlite';
+        const uploadsPath = process.env.UPLOADS_PATH || 'C:\\SamagiHardwarePOS\\uploads';
+        const backupsPath = process.env.BACKUPS_PATH || 'C:\\SamagiHardwarePOS\\backups';
+        
+        // Copy database
+        if (fs.existsSync(dbPath)) {
+            fs.copyFileSync(dbPath, path.join(backupFolder, 'pos_database.sqlite'));
+        }
+        
+        // Helper to copy folder recursively
+        const copyFolder = (src, dest) => {
+            if (!fs.existsSync(dest)) {
+                fs.mkdirSync(dest, { recursive: true });
+            }
+            const entries = fs.readdirSync(src, { withFileTypes: true });
+            for (const entry of entries) {
+                const srcPath = path.join(src, entry.name);
+                const destPath = path.join(dest, entry.name);
+                if (entry.isDirectory()) {
+                    copyFolder(srcPath, destPath);
+                } else {
+                    fs.copyFileSync(srcPath, destPath);
+                }
+            }
+        };
+        
+        // Copy uploads
+        if (fs.existsSync(uploadsPath)) {
+            copyFolder(uploadsPath, path.join(backupFolder, 'uploads'));
+        }
+        
+        // Copy backups
+        if (fs.existsSync(backupsPath)) {
+            copyFolder(backupsPath, path.join(backupFolder, 'backups'));
+        }
+        
+        writeLog(`Backup created at: ${backupFolder}`);
+        return {
+            success: true,
+            message: 'Backup created successfully on your Desktop',
+            path: backupFolder
+        };
+    } catch (error) {
+        writeLog(`Backup error: ${error.message}`);
+        return {
+            success: false,
+            error: error.message
+        };
     }
 });
 

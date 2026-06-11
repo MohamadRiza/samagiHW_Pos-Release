@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   downloadUpdate:  () => ipcRenderer.invoke('download-update'),
   installUpdate:   () => ipcRenderer.invoke('install-update'),
   restartBackend:  () => ipcRenderer.invoke('restart-backend'),
+  createDesktopBackup: () => ipcRenderer.invoke('create-desktop-backup'),
 
   // Restart app after update
   restartApp: () => ipcRenderer.invoke('install-update'),
