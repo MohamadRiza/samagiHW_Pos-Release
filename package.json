@@ -1,10 +1,10 @@
 {
   "name": "samagi-pos",
-  "version": "1.0.13",
+  "version": "1.0.15",
   "description": "Samagi Hardware POS System",
   "main": "electron/main.js",
   "author": "Nexasoft Solutions",
-  "license": "Proprietary", 
+  "license": "Proprietary",
   "private": true,
   "scripts": {
     "dev": "concurrently \"npm run backend:dev\" \"npm run frontend:dev\" \"wait-on http://localhost:3003 && electron .\"",
@@ -53,11 +53,15 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "electron/icon.ico",
